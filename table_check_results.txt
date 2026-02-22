@@ -1,0 +1,5 @@
+Checking project: https://fvgbgyzyrwrsnoyuxkdv.supabase.co
+Table 'profiles': EXISTS (Rows: null)
+Table 'pricing_plans': EXISTS (Rows: null)
+Table 'landing_pages': EXISTS (Rows: null)
+Table 'activity_logs': EXISTS (Rows: null)
