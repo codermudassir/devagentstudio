@@ -34,18 +34,21 @@ export async function PATCH(
 
     const adminClient = createAdminClient();
 
+    // Fetch current credits for logging purposes
+    const { data: currentProfile } = await adminClient
+        .from("profiles")
+        .select("credits")
+        .eq("id", params.id)
+        .single();
+
+    const currentCredits = currentProfile?.credits ?? 0;
     let newCredits: number;
 
     if (operation === "set") {
         newCredits = Math.max(0, amount);
     } else {
         // Default: add (can be negative to deduct)
-        const { data: current } = await adminClient
-            .from("profiles")
-            .select("credits")
-            .eq("id", params.id)
-            .single();
-        newCredits = Math.max(0, (current?.credits ?? 0) + amount);
+        newCredits = Math.max(0, currentCredits + amount);
     }
 
     const { data, error } = await adminClient
@@ -57,6 +60,14 @@ export async function PATCH(
 
     if (error)
         return NextResponse.json({ error: error.message }, { status: 500 });
+
+    await adminClient.from("credit_logs").insert({
+        user_id: params.id,
+        amount: newCredits - currentCredits,
+        balance_after: newCredits,
+        reason: `Admin adjustment (${operation})`,
+        admin_id: admin.id,
+    });
 
     await adminClient.from("activity_logs").insert({
         user_id: params.id,

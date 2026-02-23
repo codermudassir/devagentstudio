@@ -12,6 +12,8 @@ import {
     LogOut,
     Shield,
     ChevronRight,
+    Settings,
+    Cpu,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -19,6 +21,8 @@ const navItems = [
     { href: "/admin", label: "Dashboard", icon: LayoutDashboard, exact: true },
     { href: "/admin/users", label: "Users", icon: Users },
     { href: "/admin/crm", label: "CRM / Activity", icon: Activity },
+    { href: "/admin/ai-monitoring", label: "AI Monitoring", icon: Cpu },
+    { href: "/admin/api-management", label: "API Management", icon: Settings },
     { href: "/admin/pricing", label: "Pricing Plans", icon: DollarSign },
     { href: "/admin/landing-pages", label: "Landing Pages", icon: FileText },
 ];
@@ -89,8 +93,8 @@ export default function AdminSidebar({ isOpen, onClose, adminEmail }: AdminSideb
                                 href={item.href}
                                 onClick={onClose}
                                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${isActive
-                                        ? "text-white"
-                                        : "text-muted-foreground hover:text-foreground"
+                                    ? "text-white"
+                                    : "text-muted-foreground hover:text-foreground"
                                     }`}
                                 style={
                                     isActive
