@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 
 const MAX_MESSAGE_LENGTH = 10000;
 const MAX_SYSTEM_PROMPT_LENGTH = 5000;
@@ -84,37 +83,24 @@ function validateInput(body: unknown): { valid: boolean; error?: string; data?: 
 }
 
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-  const adminClient = createAdminClient(); // Use admin client for system-level logs
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  const useGemini = !!geminiKey;
 
+  if (!geminiKey && !openRouterKey) {
+    return NextResponse.json(
+      { error: "AI service not configured. Set GEMINI_API_KEY or OPENROUTER_API_KEY in .env.local" },
+      { status: 500 }
+    );
+  }
+
+  const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  // 1. Fetch AI Configuration from Database
-  const { data: dbConfigs } = await adminClient
-    .from("api_keys_config")
-    .select("*")
-    .eq("is_active", true)
-    .limit(1);
-
-  let activeConfig = dbConfigs?.[0];
-
-  // Hand-off to ENV if no DB config exists yet (migration support)
-  const geminiKey = activeConfig?.provider === 'gemini' ? activeConfig.api_key : process.env.GEMINI_API_KEY;
-  const openRouterKey = activeConfig?.provider === 'openrouter' ? activeConfig.api_key : process.env.OPENROUTER_API_KEY;
-  const useGemini = activeConfig ? activeConfig.provider === 'gemini' : !!geminiKey;
-  const modelName = activeConfig?.model_name || (useGemini ? (process.env.GEMINI_MODEL ?? "gemini-1.5-flash") : (process.env.OPENROUTER_MODEL ?? "google/gemini-2.0-flash:free"));
-
-  if (!geminiKey && !openRouterKey) {
-    return NextResponse.json(
-      { error: "AI service not configured. Please set up API keys in Admin Panel." },
-      { status: 500 }
-    );
   }
 
   let body: unknown;
@@ -129,21 +115,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 
-  const { message, agentId, systemPrompt, conversationHistory = [] } = validation.data!;
+  const { message, systemPrompt, conversationHistory = [] } = validation.data!;
 
-  // 2. Check user credits and account status
-  const { data: profile, error: profileError } = await adminClient
+  // Check user credits
+  const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("credits, status")
+    .select("credits")
     .eq("id", user.id)
     .single();
 
   if (profileError || !profile) {
     return NextResponse.json({ error: "Failed to fetch user profile" }, { status: 500 });
-  }
-
-  if (profile.status !== 'active') {
-    return NextResponse.json({ error: `Your account is ${profile.status}. Please contact support.` }, { status: 403 });
   }
 
   if (profile.credits <= 0) {
@@ -161,7 +143,8 @@ export async function POST(request: NextRequest) {
       ? `${systemPrompt}\n\n--- Previous conversation ---\n${historyText}\n\n--- New message ---\nUser: ${message}`
       : `${systemPrompt}\n\nUser: ${message}`;
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`;
+    const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash";
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
 
     return fetch(apiUrl, {
       method: "POST",
@@ -183,6 +166,8 @@ export async function POST(request: NextRequest) {
       { role: "user", content: message },
     ];
 
+    const model = process.env.OPENROUTER_MODEL ?? "google/gemini-2.0-flash:free";
+
     return fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -190,7 +175,7 @@ export async function POST(request: NextRequest) {
         Authorization: `Bearer ${openRouterKey}`,
       },
       body: JSON.stringify({
-        model: modelName,
+        model,
         messages,
         temperature: 0.7,
         max_tokens: 4096,
@@ -211,60 +196,54 @@ export async function POST(request: NextRequest) {
     if (!res.ok) {
       const errText = await res.text();
       console.error("AI API error:", res.status, errText);
-      return NextResponse.json({ error: "Failed to get AI response" }, { status: 502 });
+
+      if (res.status === 429) {
+        return NextResponse.json(
+          { error: "AI rate limit exceeded. Please wait a minute and try again." },
+          { status: 429 }
+        );
+      }
+
+      return NextResponse.json(
+        { error: "Failed to get AI response" },
+        { status: 502 }
+      );
     }
 
-    const data = await res.json();
     let text: string;
-    let promptTokens = 0;
-    let completionTokens = 0;
-
     if (useGemini) {
-      text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "I couldn't generate a response.";
-      promptTokens = data.usageMetadata?.promptTokenCount || 0;
-      completionTokens = data.usageMetadata?.candidatesTokenCount || 0;
+      const data = (await res.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      text =
+        data.candidates?.[0]?.content?.parts?.[0]?.text ??
+        "I couldn't generate a response. Please try again.";
     } else {
-      text = data.choices?.[0]?.message?.content?.trim() ?? "I couldn't generate a response.";
-      promptTokens = data.usage?.prompt_tokens || 0;
-      completionTokens = data.usage?.completion_tokens || 0;
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      text =
+        data.choices?.[0]?.message?.content?.trim() ??
+        "I couldn't generate a response. Please try again.";
     }
 
-    // 3. Deduct credits and log audited changes
-    const creditsToDeduct = 1; // Basic rule: 1 credit per message
-    const newCredits = Math.max(0, profile.credits - creditsToDeduct);
-
-    const { error: updateError } = await adminClient
+    // Deduct 1 credit on success
+    const { error: updateError } = await supabase
       .from("profiles")
-      .update({ credits: newCredits })
+      .update({ credits: Math.max(0, profile.credits - 1) })
       .eq("id", user.id);
 
-    if (!updateError) {
-      // 4. Log AI usage
-      await adminClient.from("ai_usage_logs").insert({
-        user_id: user.id,
-        agent_id: agentId,
-        model: modelName,
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        credits_used: creditsToDeduct,
-      });
-
-      // 5. Log Credit deduction
-      await adminClient.from("credit_logs").insert({
-        user_id: user.id,
-        amount: -creditsToDeduct,
-        balance_after: newCredits,
-        reason: `AI Chat using agent: ${agentId}`,
-      });
+    if (updateError) {
+      console.error("Failed to deduct credits:", updateError.message);
     }
 
-    return NextResponse.json({
-      response: text,
-      success: true,
-      remainingCredits: newCredits
-    });
+    return NextResponse.json({ response: text, success: true, remainingCredits: profile.credits - 1 });
   } catch (err) {
-    console.error("Chat API error:", err);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error("Chat API error:", msg);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
   }
 }
